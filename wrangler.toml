@@ -1,0 +1,14 @@
+name = "paint-web-api"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+ALLOWED_ORIGINS = "https://paint-web.pages.dev,https://paint-web.surge.sh"
+
+[[durable_objects.bindings]]
+name = "DRAWINGS"
+class_name = "Drawing"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Drawing"]
