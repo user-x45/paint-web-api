@@ -2,6 +2,8 @@ const MAX_BODY=8000000;
 const CHUNK=400000;
 const MODES=['private','view','edit'];
 const enc=new TextEncoder();
+const KEY_HEADERS=['x-owner-key','x-view-key','x-edit-key'];
+const keyOk=s=>/^[A-Za-z0-9_-]{16,64}$/.test(s||'');
 
 const reply=(body,status=200)=>new Response(typeof body==='string'?body:JSON.stringify(body),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store'}});
 
@@ -65,6 +67,15 @@ async function route(req,env){
     j.id=nid;
     return reply(j,201);
   }
+  if(!sub&&req.method==='POST'){
+    const h={};
+    for(const k of KEY_HEADERS)h[k]=req.headers.get(k)||'';
+    const r=await env.DRAWINGS.get(env.DRAWINGS.idFromName(id)).fetch('https://do/init'+url.search,{method:'POST',headers:h,body:req.body});
+    if(!r.ok)return r;
+    const j=await r.json();
+    j.id=id;
+    return reply(j,201);
+  }
   const stub=env.DRAWINGS.get(env.DRAWINGS.idFromName(id));
   if(sub==='/ws')return stub.fetch(new Request('https://do/ws',req));
   const hasBody=req.method!=='GET'&&req.method!=='HEAD';
@@ -91,7 +102,7 @@ export default{
     if(req.method==='OPTIONS'){
       return withCors(new Response(null,{status:204,headers:{
         'access-control-allow-methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-        'access-control-allow-headers':'authorization,content-type',
+        'access-control-allow-headers':'authorization,content-type,x-owner-key,x-view-key,x-edit-key',
         'access-control-max-age':'86400'
       }}));
     }
@@ -198,7 +209,10 @@ export class Drawing{
     const body=await req.text();
     const bad=checkBody(body);
     if(bad)return reply({error:bad},bad==='too_large'?413:400);
-    const ok=rand(18),vk=rand(18),ek=rand(18);
+    const given=KEY_HEADERS.map(n=>req.headers.get(n)||'');
+    const custom=given.some(Boolean);
+    if(custom&&(!given.every(keyOk)||new Set(given).size!==3))return reply({error:'bad_keys'},400);
+    const ok=custom?given[0]:rand(18),vk=custom?given[1]:rand(18),ek=custom?given[2]:rand(18);
     const [ownerHash,viewHash,editHash]=await Promise.all([sha(ok),sha(vk),sha(ek)]);
     if(await st.get('meta'))return reply({error:'exists'},409);
     const chunks=split(body),now=Date.now();
