@@ -50,7 +50,7 @@ function originAllowed(origin,env){
 
 async function route(req,env){
   const url=new URL(req.url);
-  const m=/^\/api\/d(?:\/([A-Za-z0-9_-]{12})(\/rev)?)?\/?$/.exec(url.pathname);
+  const m=/^\/api\/d(?:\/([A-Za-z0-9_-]{12})(\/(?:rev|ws))?)?\/?$/.exec(url.pathname);
   if(!m)return reply({error:'not_found'},404);
   const len=Number(req.headers.get('content-length')||0);
   if(len>MAX_BODY*3)return reply({error:'too_large'},413);
@@ -66,6 +66,7 @@ async function route(req,env){
     return reply(j,201);
   }
   const stub=env.DRAWINGS.get(env.DRAWINGS.idFromName(id));
+  if(sub==='/ws')return stub.fetch(new Request('https://do/ws',req));
   const hasBody=req.method!=='GET'&&req.method!=='HEAD';
   return stub.fetch('https://do'+(sub?'/rev':'/data')+url.search,{
     method:req.method,
@@ -78,6 +79,7 @@ export default{
   async fetch(req,env){
     const origin=req.headers.get('origin')||'';
     const withCors=res=>{
+      if(res.status===101)return res;
       const r=new Response(res.body,res);
       if(origin){
         r.headers.set('access-control-allow-origin',origin);
@@ -103,7 +105,11 @@ export default{
 
 async function roleOf(meta,key){
   if(!key)return null;
-  const h=await sha(key);
+  return roleOfHash(meta,await sha(key));
+}
+
+function roleOfHash(meta,h){
+  if(!h)return null;
   if(same(h,meta.ownerHash))return 'owner';
   const isEdit=same(h,meta.editHash),isView=same(h,meta.viewHash);
   if(!isEdit&&!isView)return null;
@@ -115,13 +121,56 @@ async function roleOf(meta,key){
 export class Drawing{
   constructor(ctx){
     this.ctx=ctx;
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping','pong'));
   }
+
+  broadcast(msg){
+    const t=JSON.stringify(msg);
+    for(const ws of this.ctx.getWebSockets()){
+      try{ws.send(t)}catch(e){}
+    }
+  }
+
+  refresh(meta){
+    for(const ws of this.ctx.getWebSockets()){
+      const a=ws.deserializeAttachment()||{};
+      const role=roleOfHash(meta,a.hash);
+      try{
+        if(!role||role==='private')ws.close(4403,'revoked');
+        else ws.send(JSON.stringify({t:'role',role,mode:role==='owner'?meta.mode:undefined,rev:meta.rev}));
+      }catch(e){}
+    }
+  }
+
+  async connect(req,meta){
+    if(req.headers.get('upgrade')!=='websocket')return reply({error:'upgrade'},426);
+    const key=(req.headers.get('sec-websocket-protocol')||'').split(',').map(s=>s.trim())[1]||'';
+    const hash=key?await sha(key):'';
+    const role=roleOfHash(meta,hash);
+    if(!role)return reply({error:'forbidden'},403);
+    if(role==='private')return reply({error:'private'},403);
+    const pair=new WebSocketPair();
+    const client=pair[0],server=pair[1];
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({hash});
+    server.send(JSON.stringify({t:'hello',role,rev:meta.rev}));
+    return new Response(null,{status:101,webSocket:client,headers:{'sec-websocket-protocol':'paint'}});
+  }
+
+  webSocketMessage(){}
+
+  webSocketClose(ws){
+    try{ws.close(1000)}catch(e){}
+  }
+
+  webSocketError(){}
 
   async fetch(req){
     const url=new URL(req.url),q=url.searchParams,st=this.ctx.storage;
     if(url.pathname==='/init')return this.init(req,q);
     const meta=await st.get('meta');
     if(!meta)return reply({error:'not_found'},404);
+    if(url.pathname==='/ws')return this.connect(req,meta);
     const key=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'');
     const role=await roleOf(meta,key);
     if(!role)return reply({error:'forbidden'},403);
@@ -135,6 +184,7 @@ export class Drawing{
     if(req.method==='PATCH')return this.patch(role,req);
     if(req.method==='DELETE'){
       if(role!=='owner')return reply({error:'forbidden'},403);
+      for(const ws of this.ctx.getWebSockets()){try{ws.close(4404,'deleted')}catch(e){}}
       await st.deleteAll();
       return reply({ok:true});
     }
@@ -185,6 +235,7 @@ export class Drawing{
     if(cur.chunks>chunks.length){
       await st.delete(Array.from({length:cur.chunks-chunks.length},(_,i)=>'c:'+(chunks.length+i)));
     }
+    this.broadcast({t:'rev',rev:next.rev,by:q.get('cid')||''});
     return reply({rev:next.rev});
   }
 
@@ -210,6 +261,7 @@ export class Drawing{
     if(b.mode!==undefined)next.mode=b.mode;
     if(b.rotate){next.viewHash=viewHash;next.editHash=editHash}
     await st.put('meta',next);
+    this.refresh(next);
     return reply({mode:next.mode,rev:next.rev,...out});
   }
 }
