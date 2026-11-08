@@ -148,7 +148,10 @@ export class Drawing{
       const role=roleOfHash(meta,a.hash);
       try{
         if(!role||role==='private')ws.close(4403,'revoked');
-        else ws.send(JSON.stringify({t:'role',role,mode:role==='owner'?meta.mode:undefined,rev:meta.rev}));
+        else{
+          ws.serializeAttachment({hash:a.hash,role});
+          ws.send(JSON.stringify({t:'role',role,mode:role==='owner'?meta.mode:undefined,rev:meta.rev}));
+        }
       }catch(e){}
     }
   }
@@ -163,12 +166,21 @@ export class Drawing{
     const pair=new WebSocketPair();
     const client=pair[0],server=pair[1];
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({hash});
+    server.serializeAttachment({hash,role});
     server.send(JSON.stringify({t:'hello',role,rev:meta.rev}));
     return new Response(null,{status:101,webSocket:client,headers:{'sec-websocket-protocol':'paint'}});
   }
 
-  webSocketMessage(){}
+  webSocketMessage(ws,msg){
+    if(typeof msg!=='string'||msg.length>MAX_BODY)return;
+    const a=ws.deserializeAttachment()||{};
+    if(a.role!=='owner'&&a.role!=='edit')return;
+    if(!/^\{"t":"(?:op|live)"/.test(msg))return;
+    for(const s of this.ctx.getWebSockets()){
+      if(s===ws)continue;
+      try{s.send(msg)}catch(e){}
+    }
+  }
 
   webSocketClose(ws){
     try{ws.close(1000)}catch(e){}
@@ -249,7 +261,7 @@ export class Drawing{
     if(cur.chunks>chunks.length){
       await st.delete(Array.from({length:cur.chunks-chunks.length},(_,i)=>'c:'+(chunks.length+i)));
     }
-    this.broadcast({t:'rev',rev:next.rev,by:q.get('cid')||''});
+    this.broadcast({t:'rev',rev:next.rev,by:q.get('cid')||'',full:q.get('full')==='1'?1:0});
     return reply({rev:next.rev});
   }
 
