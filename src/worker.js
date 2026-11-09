@@ -1,4 +1,4 @@
-const MAX_BODY=8000000;
+const MAX_BODY=12000000;
 const CHUNK=400000;
 const MODES=['private','view','edit'];
 const enc=new TextEncoder();
